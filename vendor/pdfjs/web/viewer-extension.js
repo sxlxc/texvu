@@ -250,6 +250,20 @@
     }
     window.addEventListener("focus", reportFocus);
     events.addEventListener("open", reportFocus);
+    events.addEventListener("focus-probe", reportFocus);
+    let previousTitle;
+    let titleTimer;
+    function restoreTitle() {
+      clearTimeout(titleTimer);
+      if (document.title === "texvu-" + tab) document.title = previousTitle;
+    }
+    events.addEventListener("mark-tab", () => {
+      restoreTitle();
+      previousTitle = document.title;
+      document.title = "texvu-" + tab;
+      titleTimer = setTimeout(restoreTitle, 5000);
+    });
+    events.addEventListener("unmark-tab", restoreTitle);
     events.addEventListener("forward-search", event => queueJump(JSON.parse(event.data)));
     events.addEventListener("pdf-changed", reloadDocument);
     window.addEventListener("beforeunload", saveProgress);

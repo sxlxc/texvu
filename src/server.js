@@ -89,13 +89,52 @@ function openBrowser(url) {
 const runFile = promisify(execFile);
 const focusScript = fileURLToPath(new URL("./focus-tab.jxa", import.meta.url));
 
-async function focusTab({ id, agent }) {
+const firefoxScript = fileURLToPath(new URL("./focus-firefox.jxa", import.meta.url));
+
+async function focusFirefox(tab) {
+  // A separate Firefox profile can run as a separate macOS application instance.
+  const socket = tab.response.socket;
+  if (!socket) return "The Firefox viewer disconnected.";
+  if (!tab.firefoxPid && socket.remoteAddress === socket.localAddress) {
+    const { stdout } = await runFile("/usr/sbin/lsof", ["-nP", "-iTCP:" + socket.localPort, "-sTCP:ESTABLISHED", "-Fpn"], { timeout: 1000 }).catch(() => ({ stdout: "" }));
+    let pid;
+    for (const field of stdout.split("\n")) {
+      if (field.startsWith("p")) pid = field.slice(1);
+      if (field.startsWith("n") && field.includes(":" + socket.remotePort + "->") && field.endsWith(":" + socket.localPort)) tab.firefoxPid = pid;
+    }
+  }
+  const run = mode => runFile("/usr/bin/osascript", ["-l", "JavaScript", firefoxScript, mode, tab.id, tab.firefoxPid ?? ""], { timeout: 3500, killSignal: "SIGKILL" });
+  const probe = async () => {
+    const since = Date.now();
+    tab.response.write("event: focus-probe\ndata: {}\n\n");
+    for (let i = 0; i < 10; i++) {
+      await new Promise(resolve => setTimeout(resolve, 30));
+      if (tab.lastFocus >= since) return true;
+    }
+    return false;
+  };
+  await run("raise");
+  if (await probe()) return;
+  tab.response.write("event: mark-tab\ndata: {}\n\n");
+  try {
+    const { stdout } = await run("select");
+    if (stdout.trim() === "permission") return "PDF scrolled. To select a background Firefox tab, allow Accessibility for the app running the texvu server in macOS System Settings.";
+    if (await probe()) return;
+    return "PDF scrolled. Firefox could not select the viewer tab.";
+  } finally {
+    tab.response.write("event: unmark-tab\ndata: {}\n\n");
+  }
+}
+
+async function focusTab(tab) {
+  const { id, agent } = tab;
   if (process.platform !== "darwin" || !/^\d+(?:-\d+){3}$/.test(id)) return;
   let browser;
   if (/Chrome\//.test(agent)) browser = "com.google.Chrome";
   else if (/Version\/.*Safari\//.test(agent)) browser = "com.apple.Safari";
-  if (!browser) return;
   try {
+    if (/Firefox\//.test(agent)) return await focusFirefox(tab);
+    if (!browser) return;
     const { stdout } = await runFile("/usr/bin/osascript", ["-l", "JavaScript", focusScript, browser, id], { timeout: 4000, killSignal: "SIGKILL" });
     if (stdout.trim() === "focused") return;
     return "Scrolled in the background. The browser could not locate the viewer tab.";

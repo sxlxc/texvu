@@ -1,0 +1,51 @@
+// Firefox exposes its tab strip through macOS Accessibility.
+ObjC.import("AppKit");
+ObjC.import("ApplicationServices");
+
+function attribute(element, name) {
+  const result = Ref();
+  if ($.AXUIElementCopyAttributeValue(element, $(name), result) === 0) return result[0];
+}
+
+function elements(array) {
+  if (!array) return [];
+  return Array.from({ length: $.CFArrayGetCount(array) }, (_, i) => array.objectAtIndex(i));
+}
+
+function findTab(element, marker) {
+  const role = ObjC.unwrap(attribute(element, "AXRole"));
+  // Ignore document content. Only browser chrome can contain the target tab.
+  if (role === "AXWebArea") return;
+  if (role === "AXRadioButton" || role === "AXTab" || role === "AXButton") {
+    if (["AXTitle", "AXDescription"].some(key => ObjC.unwrap(attribute(element, key)) === marker)) return element;
+  }
+  for (const child of elements(attribute(element, "AXChildren"))) {
+    const tab = findTab(child, marker);
+    if (tab) return tab;
+  }
+}
+
+function run([mode, id, pid]) {
+  const apps = $.NSRunningApplication.runningApplicationsWithBundleIdentifier("org.mozilla.firefox");
+  const candidates = Array.from({ length: Number(apps.count) }, (_, i) => apps.objectAtIndex(i));
+  const owner = candidates.find(app => Number(app.processIdentifier) === Number(pid));
+  if (!candidates.length) return "closed";
+  if (mode === "raise") {
+    if (owner || candidates.length === 1) (owner || candidates[0]).activateWithOptions(2);
+    return "raised";
+  }
+  if (!$.AXIsProcessTrusted()) return "permission";
+  for (const app of owner ? [owner] : candidates) {
+    const process = $.AXUIElementCreateApplication(app.processIdentifier);
+    for (const win of elements(attribute(process, "AXWindows"))) {
+      const tab = findTab(win, "texvu-" + id);
+      if (!tab) continue;
+      $.AXUIElementSetAttributeValue(win, $("AXMinimized"), $.kCFBooleanFalse);
+      if ($.AXUIElementPerformAction(tab, $("AXPress")) !== 0) continue;
+      $.AXUIElementPerformAction(win, $("AXRaise"));
+      app.activateWithOptions(2);
+      return "selected";
+    }
+  }
+  return "missing";
+}
