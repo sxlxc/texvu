@@ -1,0 +1,44 @@
+#synctexStatus {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  z-index: 100;
+  max-width: min(640px, calc(100vw - 32px));
+  color: var(--message-bar-fg-color, #15141a);
+  background: var(--message-bar-bg-color, #deeafc);
+  border: 1px solid var(--message-bar-border-color, rgb(0 0 0 / 8%));
+  box-shadow: 0 2px 8px rgb(0 0 0 / 20%);
+  transform: translateX(-50%);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 80ms linear;
+}
+#synctexStatus.visible { opacity: 1; }
+#synctexSettingsDialog {
+  width: min(640px, calc(100vw - 32px));
+  max-height: calc(100vh - 48px);
+  padding: 0;
+  color: var(--main-color, #333);
+  background: var(--dialog-background, #fff);
+  border: 0;
+  border-radius: 4px;
+  box-shadow: 0 4px 16px rgb(0 0 0 / 35%);
+}
+#synctexSettingsDialog::backdrop { background: rgb(0 0 0 / 45%); }
+#synctexSettingsDialog .synctexDialogContent { padding: 16px; }
+#synctexSettingsDialog h2 { margin: 0 0 12px; font-size: 1.1rem; font-weight: 600; }
+#synctexSettingsDialog p { margin: 0 0 14px; color: var(--body-color, #555); }
+#synctexSettingsDialog label { display: grid; gap: 4px; margin: 10px 0; }
+#synctexSettingsDialog input, #synctexSettingsDialog textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  color: var(--main-color, #333);
+  background: var(--field-background, #fff);
+  border: 1px solid var(--field-border-color, #8f8f9d);
+  border-radius: 2px;
+  font: 13px/1.4 monospace;
+}
+#synctexSettingsDialog textarea { resize: vertical; }
+#synctexSettingsDialog .synctexDialogActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+#synctexSettingsDialog button { min-width: 80px; padding: 6px 12px; }
