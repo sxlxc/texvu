@@ -81,7 +81,11 @@ export async function forwardSearch({ pdfPath, source, line, column, settings })
   const output = await run(settings.synctexCommand, args, path.dirname(pdfPath));
   const record = parseSyncTexOutput(output).find(item => item.Page && (item.x ?? item.h) !== undefined);
   if (!record) throw new Error("SyncTeX returned no matching PDF position");
-  return { page: record.Page, x: record.x ?? record.h, y: record.y ?? record.v };
+  const position = { page: record.Page, x: record.x ?? record.h, y: record.y ?? record.v };
+  if ([record.h, record.v, record.W, record.H].every(Number.isFinite) && record.W > 0 && record.H > 0) {
+    position.box = { left: record.h, bottom: record.v, width: record.W, height: record.H };
+  }
+  return position;
 }
 
 export async function inverseSearch({ pdfPath, page, x, y, settings }) {

@@ -66,6 +66,32 @@
   }
   let pagesReady = false;
   let pendingJump;
+  let jumpHighlight;
+  function markJump(result, pageTop) {
+    const viewer = application.pdfViewer;
+    const { div, viewport } = viewer.getPageView(result.page - 1);
+    const [, y] = viewport.convertToViewportPoint(result.x, pageTop - result.y);
+    const container = viewer.container;
+    const targetY = div.getBoundingClientRect().top + div.clientTop + y;
+    container.scrollTop += targetY - container.getBoundingClientRect().top - container.clientHeight * 0.25;
+
+    // Some SyncTeX engines return a point without a line box.
+    const box = result.box ?? { left: result.x - 4, bottom: result.y + 3, width: 36, height: 12 };
+    const [x1, y1, x2, y2] = viewport.convertToViewportRectangle([
+      box.left, pageTop - box.bottom, box.left + box.width, pageTop - box.bottom + box.height,
+    ]);
+    jumpHighlight?.remove();
+    const marker = document.createElement("div");
+    marker.className = "synctexJumpHighlight";
+    marker.setAttribute("aria-hidden", "true");
+    marker.style.left = `${100 * Math.min(x1, x2) / viewport.width}%`;
+    marker.style.top = `${100 * Math.min(y1, y2) / viewport.height}%`;
+    marker.style.width = `${100 * Math.abs(x2 - x1) / viewport.width}%`;
+    marker.style.height = `${100 * Math.abs(y2 - y1) / viewport.height}%`;
+    div.append(marker);
+    jumpHighlight = marker;
+    setTimeout(() => marker.remove(), 2000);
+  }
   async function applyJump() {
     if (!pagesReady || !pendingJump) return;
     const result = pendingJump;
@@ -78,6 +104,7 @@
         destArray: [null, { name: "XYZ" }, result.x, page.view[3] - result.y, null],
         ignoreDestinationZoom: true,
       });
+      markJump(result, page.view[3]);
       pendingJump = null;
     } catch (error) {
       if (pagesReady && pendingJump === result) showStatus(error.message);

@@ -42,3 +42,17 @@
 #synctexSettingsDialog textarea { resize: vertical; }
 #synctexSettingsDialog .synctexDialogActions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
 #synctexSettingsDialog button { min-width: 80px; padding: 6px 12px; }
+
+.synctexJumpHighlight {
+  position: absolute;
+  z-index: 5;
+  pointer-events: none;
+  background: rgb(255 198 40 / 40%);
+  outline: 1px solid rgb(179 115 0 / 55%);
+  border-radius: 2px;
+  animation: synctexJumpFade 2s ease-out forwards;
+}
+@keyframes synctexJumpFade {
+  0%, 20% { opacity: 1; }
+  100% { opacity: 0; }
+}
