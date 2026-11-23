@@ -32,7 +32,7 @@ Start `texvu main.pdf` once. For Texlab, add these entries to VS Code settings:
 }
 ```
 
-Use your installed executable path if it differs. Texlab’s forward-search command scrolls the most recently focused viewer for the output PDF. It leaves keyboard focus in the editor. If the server or viewer is closed, the command reports how to open it. From a terminal, use `texvu jump main.pdf chapters/intro.tex 42`.
+Use your installed executable path if it differs. Texlab’s forward-search command scrolls the most recently focused viewer for the output PDF. On macOS, texvu brings that tab to the front in Safari or Google Chrome. macOS may request Automation permission on the first jump. To keep keyboard focus in the editor, set `"texlab.forwardSearch.args": ["jump", "--no-focus", "%p", "%f", "%l"]`. Other browsers and platforms scroll in the background. If the server or viewer is closed, the command reports how to open it. From a terminal, use `texvu jump main.pdf chapters/intro.tex 42`.
 
 ## Settings
 

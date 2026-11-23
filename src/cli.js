@@ -14,13 +14,14 @@ Serve a local PDF.js viewer with SyncTeX support.
 
 Usage:
   texvu [options] <file.pdf>
-  texvu jump <file.pdf> <source.tex> <line> [column]
+  texvu jump [--no-focus] <file.pdf> <source.tex> <line> [column]
 
 Options:
   -p, --port <number>   Port to listen on (default: automatic)
   -H, --host <address>  Address to bind (default: 127.0.0.1)
       --open            Open the viewer in the default browser (default)
       --no-open         Print the URL without opening a browser
+      --no-focus        Scroll without activating the browser (jump only)
   -h, --help            Show this help
   -v, --version         Show the version
 
@@ -71,11 +72,13 @@ function parseArgs(argv) {
 let options;
 try {
   if (process.argv[2] === "jump") {
-    const [pdf, source, line, column = "1", ...extra] = process.argv.slice(3);
+    const args = process.argv.slice(3);
+    const focus = !args.includes("--no-focus");
+    const [pdf, source, line, column = "1", ...extra] = args.filter(arg => arg !== "--no-focus");
     if (!pdf || !source || extra.length || ![line, column].every(n => /^[1-9]\d*$/.test(n) && Number.isSafeInteger(Number(n)))) {
-      throw new Error("Usage: texvu jump <file.pdf> <source.tex> <line> [column]");
+      throw new Error("Usage: texvu jump [--no-focus] <file.pdf> <source.tex> <line> [column]");
     }
-    await jump(pdf, source, Number(line), Number(column));
+    await jump(pdf, source, Number(line), Number(column), focus);
     process.exit(0);
   }
   options = parseArgs(process.argv.slice(2));

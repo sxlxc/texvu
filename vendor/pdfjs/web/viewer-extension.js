@@ -241,6 +241,9 @@
     addToolbarButton("synctexForwardButton", "SyncTeX forward search", forwardSyncTeX);
     addToolbarButton("synctexSettingsButton", "SyncTeX settings", openSettings);
     const tab = Array.from(crypto.getRandomValues(new Uint32Array(4))).join("-");
+    const viewerUrl = new URL(location.href);
+    viewerUrl.searchParams.set("texvuTab", tab);
+    history.replaceState(history.state, "", viewerUrl);
     const events = new EventSource(`/events?tab=${tab}`);
     function reportFocus() {
       if (document.hasFocus()) fetch(`/api/focus?tab=${tab}`, { method: "POST" }).catch(() => {});

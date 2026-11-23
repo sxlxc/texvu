@@ -3,7 +3,8 @@ import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { promisify } from "node:util";
+import { execFile, spawn } from "node:child_process";
 import { listenForJumps } from "./jump.js";
 import { DEFAULT_SETTINGS, findSyncTexPath, forwardSearch, inverseSearch, openEditor } from "./synctex.js";
 
@@ -85,6 +86,24 @@ function openBrowser(url) {
   child.unref();
 }
 
+const runFile = promisify(execFile);
+const focusScript = fileURLToPath(new URL("./focus-tab.jxa", import.meta.url));
+
+async function focusTab({ id, agent }) {
+  if (process.platform !== "darwin" || !/^\d+(?:-\d+){3}$/.test(id)) return;
+  let browser;
+  if (/Chrome\//.test(agent)) browser = "com.google.Chrome";
+  else if (/Version\/.*Safari\//.test(agent)) browser = "com.apple.Safari";
+  if (!browser) return;
+  try {
+    const { stdout } = await runFile("/usr/bin/osascript", ["-l", "JavaScript", focusScript, browser, id], { timeout: 4000, killSignal: "SIGKILL" });
+    if (stdout.trim() === "focused") return;
+    return "Scrolled in the background. The browser could not locate the viewer tab.";
+  } catch (error) {
+    return `Scrolled in the background. Browser activation failed: ${error.stderr?.trim() || error.message}`;
+  }
+}
+
 function safeStaticPath(root, requestPath) {
   const filePath = path.resolve(root, `.${requestPath}`);
   return filePath.startsWith(`${root}${path.sep}`) ? filePath : null;
@@ -150,7 +169,7 @@ export async function startServer({ pdfPath, host = "127.0.0.1", port = 4173, op
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
         response.write(": connected\n\n");
         const id = url.searchParams.get("tab");
-        clients.set(id, { response, lastFocus: 0 });
+        clients.set(id, { response, id, agent: request.headers["user-agent"] ?? "", lastFocus: 0 });
         response.on("close", () => {
           if (clients.get(id)?.response === response) clients.delete(id);
         });
@@ -232,14 +251,17 @@ export async function startServer({ pdfPath, host = "127.0.0.1", port = 4173, op
         if (request.method === "GET") return sendJson(response, 200, { lastFocus: targetTab()?.lastFocus ?? null });
         const noViewer = `No viewer open for ${pdfName}. Open ${url}`;
         if (!targetTab()) throw new Error(noViewer);
-        const { source, line, column } = await readJson(request);
+        const { source, line, column, focus = true } = await readJson(request);
         const sequence = ++latestJump;
         const position = await forwardSearch({ pdfPath, source, line, column, settings });
         if (sequence !== latestJump) return sendJson(response, 200, {});
         const tab = targetTab();
         if (!tab) throw new Error(noViewer);
+        const warning = focus ? await focusTab(tab) : undefined;
+        if (sequence !== latestJump) return sendJson(response, 200, {});
+        if (tab.response.destroyed) throw new Error(noViewer);
         tab.response.write(`event: forward-search\ndata: ${JSON.stringify(position)}\n\n`);
-        sendJson(response, 200, {});
+        sendJson(response, 200, { warning });
       } catch (error) { sendError(response, 400, error); }
     });
     server.once("close", () => control.close());

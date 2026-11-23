@@ -53,12 +53,12 @@ function request(socketPath, method, body) {
       } catch (error) { reject(error); }
     });
     req.on("error", reject);
-    req.setTimeout(10000, () => req.destroy(new Error("Viewer timed out")));
+    req.setTimeout(15000, () => req.destroy(new Error("Viewer timed out")));
     req.end(body && JSON.stringify(body));
   });
 }
 
-export async function jump(pdf, source, line, column) {
+export async function jump(pdf, source, line, column, focus = true) {
   const prefix = await socketPrefix(pdf);
   if (directory) await privateDirectory();
   const root = directory ?? "\\\\.\\pipe";
@@ -78,5 +78,6 @@ export async function jump(pdf, source, line, column) {
   }
   if (!servers.length) throw new Error(`No server running for ${pdf}. Start texvu with that PDF first.`);
   const [target] = servers.sort((a, b) => (b.lastFocus ?? -1) - (a.lastFocus ?? -1));
-  await request(target.socket, "POST", { source: path.resolve(source), line, column });
+  const { warning } = await request(target.socket, "POST", { source: path.resolve(source), line, column, focus });
+  if (warning) console.error(`texvu: ${warning}`);
 }

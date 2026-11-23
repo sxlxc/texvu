@@ -1,0 +1,23 @@
+// Executed by macOS JavaScript for Automation. Arguments arrive as data.
+function run([bundleId, tabId]) {
+  const browser = Application(bundleId);
+  if (!browser.running()) return "closed";
+  const safari = bundleId === "com.apple.Safari";
+  for (const win of browser.windows()) {
+    const urls = win.tabs.url();
+    const index = urls.findIndex(url => typeof url === "string" &&
+      url.split("#")[0].split("?")[1]?.split("&").includes("texvuTab=" + tabId));
+    if (index < 0) continue;
+    if (safari) {
+      win.currentTab = win.tabs[index];
+      if (win.miniaturized()) win.miniaturized = false;
+    } else {
+      win.activeTabIndex = index + 1;
+      if (win.minimized()) win.minimized = false;
+    }
+    win.index = 1;
+    browser.activate();
+    return "focused";
+  }
+  return "missing";
+}
