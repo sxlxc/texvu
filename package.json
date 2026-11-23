@@ -1,6 +1,6 @@
 {
   "name": "texvu",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "A lightweight local PDF.js viewer with SyncTeX and automatic reloads for LaTeX workflows.",
   "repository": {
     "type": "git",

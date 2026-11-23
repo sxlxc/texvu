@@ -64,12 +64,36 @@
     if (!saved?.pdfOpenParams) application.pdfViewer.currentPageNumber = saved?.page || 1;
     restoring = false;
   }
+  let pagesReady = false;
+  let pendingJump;
+  async function applyJump() {
+    if (!pagesReady || !pendingJump) return;
+    const result = pendingJump;
+    const pdf = application.pdfDocument;
+    try {
+      const page = await pdf.getPage(result.page);
+      if (!pagesReady || pendingJump !== result || application.pdfDocument !== pdf) return;
+      application.pdfViewer.scrollPageIntoView({
+        pageNumber: result.page,
+        destArray: [null, { name: "XYZ" }, result.x, page.view[3] - result.y, null],
+        ignoreDestinationZoom: true,
+      });
+      pendingJump = null;
+    } catch (error) {
+      if (pagesReady && pendingJump === result) showStatus(error.message);
+    }
+  }
+  function queueJump(result) {
+    pendingJump = result;
+    void applyJump();
+  }
   async function reloadDocument() {
     saveProgress();
     try {
       const nextState = await getDocumentState();
       documentState = nextState;
       document.title = nextState.name ? `${nextState.name} - PDF.js` : "PDF.js viewer";
+      pagesReady = false;
       await application.open({ url: `/pdf?mtime=${encodeURIComponent(nextState.mtimeMs)}` });
       showStatus("PDF reloaded");
     } catch (error) { showStatus(error.message); }
@@ -87,13 +111,7 @@
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error);
-      const page = await application.pdfDocument.getPage(result.page);
-      const pageHeight = page.getViewport({ scale: 1 }).height;
-      application.pdfViewer.scrollPageIntoView({
-        pageNumber: result.page,
-        destArray: [null, { name: "XYZ" }, result.x, pageHeight - result.y, null],
-        ignoreDestinationZoom: true,
-      });
+      queueJump(result);
       showStatus(`SyncTeX: ${source}:${line}`);
     } catch (error) { showStatus(error.message); }
   }
@@ -183,14 +201,26 @@
     documentState = await getDocumentState();
     document.title = documentState.name ? `${documentState.name} - PDF.js` : "PDF.js viewer";
     const eventBus = application.eventBus;
-    eventBus.on("pagesloaded", restoreProgress);
+    pagesReady = Boolean(application.pdfViewer.pageViewsReady);
+    eventBus.on("pagesloaded", () => {
+      pagesReady = true;
+      restoreProgress();
+      void applyJump();
+    });
     eventBus.on("pagechanging", scheduleSave);
     eventBus.on("scalechanging", scheduleSave);
     eventBus.on("updateviewarea", scheduleSave);
     document.querySelector("#viewerContainer").addEventListener("click", inverseSyncTeX, true);
     addToolbarButton("synctexForwardButton", "SyncTeX forward search", forwardSyncTeX);
     addToolbarButton("synctexSettingsButton", "SyncTeX settings", openSettings);
-    const events = new EventSource("/events");
+    const tab = Array.from(crypto.getRandomValues(new Uint32Array(4))).join("-");
+    const events = new EventSource(`/events?tab=${tab}`);
+    function reportFocus() {
+      if (document.hasFocus()) fetch(`/api/focus?tab=${tab}`, { method: "POST" }).catch(() => {});
+    }
+    window.addEventListener("focus", reportFocus);
+    events.addEventListener("open", reportFocus);
+    events.addEventListener("forward-search", event => queueJump(JSON.parse(event.data)));
     events.addEventListener("pdf-changed", reloadDocument);
     window.addEventListener("beforeunload", saveProgress);
     document.addEventListener("keydown", event => {

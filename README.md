@@ -21,6 +21,19 @@ pdflatex -synctex=1 main.tex
 
 The viewer looks beside the PDF for `main.synctex.gz` and `main.synctex`. It invokes the local `synctex` executable for source-to-PDF and PDF-to-source lookups. The browser shortcut for forward search is `Ctrl+Alt+J` or `Cmd+Option+J`, matching LaTeX Workshop. Hold `Ctrl` or `Cmd` while clicking a page for inverse search.
 
+## Forward search from VS Code
+
+Start `texvu main.pdf` once. For Texlab, add these entries to VS Code settings:
+
+```json
+{
+  "texlab.forwardSearch.executable": "/opt/homebrew/bin/texvu",
+  "texlab.forwardSearch.args": ["jump", "%p", "%f", "%l"]
+}
+```
+
+Use your installed executable path if it differs. Texlab’s forward-search command scrolls the most recently focused viewer for the output PDF. It leaves keyboard focus in the editor. If the server or viewer is closed, the command reports how to open it. From a terminal, use `texvu jump main.pdf chapters/intro.tex 42`.
+
 ## Settings
 
 The Settings button edits `.pdfjs-synctex.json` beside the PDF. Commands use argument arrays and are executed without a shell. These placeholders are available:

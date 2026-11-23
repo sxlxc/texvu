@@ -4,6 +4,7 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { listenForJumps } from "./jump.js";
 import { DEFAULT_SETTINGS, findSyncTexPath, forwardSearch, inverseSearch, openEditor } from "./synctex.js";
 
 const vendorDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../vendor/pdfjs");
@@ -116,12 +117,15 @@ export async function startServer({ pdfPath, host = "127.0.0.1", port = 4173, op
   if (!pdfStats?.isFile()) throw new Error(`PDF file does not exist: ${pdfPath}`);
   if (!pdfPath.toLowerCase().endsWith(".pdf")) throw new Error("The input file must have a .pdf extension");
   let settings = await loadSettings(pdfPath);
-  const clients = new Set();
+  const clients = new Map();
+  function targetTab() {
+    return [...clients.values()].sort((a, b) => b.lastFocus - a.lastFocus)[0];
+  }
   let changeTimer;
   const notifyChange = () => {
     clearTimeout(changeTimer);
     changeTimer = setTimeout(() => {
-      for (const response of clients) response.write(`event: pdf-changed\ndata: ${JSON.stringify({ at: Date.now() })}\n\n`);
+      for (const { response } of clients.values()) response.write(`event: pdf-changed\ndata: ${JSON.stringify({ at: Date.now() })}\n\n`);
     }, 120);
   };
   const directory = path.dirname(pdfPath);
@@ -145,8 +149,17 @@ export async function startServer({ pdfPath, host = "127.0.0.1", port = 4173, op
       if (request.method === "GET" && url.pathname === "/events") {
         response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
         response.write(": connected\n\n");
-        clients.add(response);
-        request.on("close", () => clients.delete(response));
+        const id = url.searchParams.get("tab");
+        clients.set(id, { response, lastFocus: 0 });
+        response.on("close", () => {
+          if (clients.get(id)?.response === response) clients.delete(id);
+        });
+        return;
+      }
+      if (url.pathname === "/api/focus" && request.method === "POST") {
+        const tab = clients.get(url.searchParams.get("tab"));
+        if (tab) tab.lastFocus = Date.now();
+        response.writeHead(204).end();
         return;
       }
       if (url.pathname === "/api/state" && request.method === "GET") {
@@ -212,6 +225,28 @@ export async function startServer({ pdfPath, host = "127.0.0.1", port = 4173, op
     server.listen(port, host);
   });
   const url = `http://${host}:${server.address().port}/web/viewer.html?file=${encodeURIComponent("/pdf")}`;
+  let latestJump = 0;
+  try {
+    const control = await listenForJumps(pdfPath, async (request, response) => {
+      try {
+        if (request.method === "GET") return sendJson(response, 200, { lastFocus: targetTab()?.lastFocus ?? null });
+        const noViewer = `No viewer open for ${pdfName}. Open ${url}`;
+        if (!targetTab()) throw new Error(noViewer);
+        const { source, line, column } = await readJson(request);
+        const sequence = ++latestJump;
+        const position = await forwardSearch({ pdfPath, source, line, column, settings });
+        if (sequence !== latestJump) return sendJson(response, 200, {});
+        const tab = targetTab();
+        if (!tab) throw new Error(noViewer);
+        tab.response.write(`event: forward-search\ndata: ${JSON.stringify(position)}\n\n`);
+        sendJson(response, 200, {});
+      } catch (error) { sendError(response, 400, error); }
+    });
+    server.once("close", () => control.close());
+  } catch (error) {
+    server.close();
+    throw error;
+  }
   console.log(`texvu serving ${pdfPath}`);
   console.log(`Viewer: ${url}`);
   console.log(`SyncTeX: ${await findSyncTexPath(pdfPath) ? "available" : "not found"}`);

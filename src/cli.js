@@ -3,6 +3,7 @@
 import path from "node:path";
 import process from "node:process";
 import fs from "node:fs/promises";
+import { jump } from "./jump.js";
 import { startServer } from "./server.js";
 
 const packageJson = JSON.parse(await fs.readFile(new URL("../package.json", import.meta.url), "utf8"));
@@ -13,6 +14,7 @@ Serve a local PDF.js viewer with SyncTeX support.
 
 Usage:
   texvu [options] <file.pdf>
+  texvu jump <file.pdf> <source.tex> <line> [column]
 
 Options:
   -p, --port <number>   Port to listen on (default: automatic)
@@ -68,6 +70,14 @@ function parseArgs(argv) {
 
 let options;
 try {
+  if (process.argv[2] === "jump") {
+    const [pdf, source, line, column = "1", ...extra] = process.argv.slice(3);
+    if (!pdf || !source || extra.length || ![line, column].every(n => /^[1-9]\d*$/.test(n) && Number.isSafeInteger(Number(n)))) {
+      throw new Error("Usage: texvu jump <file.pdf> <source.tex> <line> [column]");
+    }
+    await jump(pdf, source, Number(line), Number(column));
+    process.exit(0);
+  }
   options = parseArgs(process.argv.slice(2));
 } catch (error) {
   console.error(`texvu: ${error.message}`);
@@ -83,6 +93,8 @@ if (options.help || !options.pdf) {
 }
 
 try {
+  process.once("SIGINT", () => process.exit(130));
+  process.once("SIGTERM", () => process.exit(143));
   await startServer({
     pdfPath: path.resolve(options.pdf),
     host: options.host,
