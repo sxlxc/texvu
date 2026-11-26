@@ -6,12 +6,13 @@
 
 ```sh
 brew install sxlxc/texvu/texvu
+brew services start texvu
 texvu main.pdf
 ```
 
-This starts a local server on a free port and opens the PDF in your browser. Leave the terminal running while you edit. Press Ctrl+C to stop. Use `--no-open` for a headless session or `--port 8080` for a fixed URL.
+Homebrew runs one daemon at `127.0.0.1:4173` and starts it again at login. `texvu main.pdf` opens the viewer and exits. Use `texvu --no-open main.pdf` to print its bookmarkable URL. The same PDF keeps its URL across terminal sessions, browser restarts, and daemon restarts. PDFs with the same filename in different directories have separate URLs. Use `brew services stop texvu` to stop serving them.
 
-From a source checkout, run `node src/cli.js main.pdf`.
+From a source checkout, run `npm ci` and `node src/cli.js daemon`, then `node src/cli.js main.pdf` in another terminal. For a different port, pass the same `--port` to the daemon, open, and jump commands. The same rule applies to `--host`. Bind to a public interface only on a trusted network because viewers can configure local editor and SyncTeX commands.
 
 Build the document with SyncTeX enabled. For example, LaTeX Workshop recipes commonly pass `-synctex=1`.
 
@@ -54,8 +55,9 @@ The shipped defaults correspond to the SyncTeX CLI forms `synctex view -i line:c
 
 - The Firefox-style PDF.js viewer and its locale, icon, font, CMap, and WASM assets are vendored from the PDF.js 4.10.38 distribution release.
 - The PDF.js runtime and worker are served locally, so the viewer works without a CDN and without disabling the worker.
-- The server uses the Node standard HTTP server and server-sent events. It does not keep a polling loop or a WebSocket connection open.
-- PDF requests support byte ranges, which lets PDF.js avoid downloading more data than it needs.
+- Each open tab has an event-driven WebSocket connection. A rebuild refreshes all tabs for that PDF. A forward search scrolls only its most recently focused tab.
+- The daemon streams PDF byte ranges from disk and shares one filesystem watcher among the tabs for a PDF. Closing the last tab releases the watcher. Idle documents keep only a path record under `$XDG_STATE_HOME/texvu/documents` (default `~/.local/state/texvu/documents`).
+- The CLI registers PDFs and sends jump requests over a local control socket.
 
 The vendored PDF.js files are covered by the Apache 2.0 license in [vendor/pdfjs/LICENSE](vendor/pdfjs/LICENSE). The project code remains MIT licensed.
 

@@ -12,3 +12,5 @@ sed -e "s/vVERSION/v$version/" -e "s/REVISION/$(git rev-parse "v$version^{commit
 ```
 
 Commit and push the generated formula in the tap repository. Verify with `brew install sxlxc/texvu/texvu` and `brew test sxlxc/texvu/texvu`.
+
+The formula bundles the locked WebSocket dependency as a Homebrew resource. When updating `ws`, update its resource URL and SHA-256 in the template. After installing the generated formula, run `brew services start texvu`, then `texvu --no-open main.pdf` to register a document.

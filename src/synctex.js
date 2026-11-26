@@ -63,7 +63,7 @@ function parseSyncTexOutput(output) {
 }
 
 export async function findSyncTexPath(pdfPath) {
-  const base = pdfPath.endsWith(".pdf") ? pdfPath.slice(0, -4) : pdfPath;
+  const base = pdfPath.toLowerCase().endsWith(".pdf") ? pdfPath.slice(0, -4) : pdfPath;
   for (const candidate of [`${base}.synctex.gz`, `${base}.synctex`]) {
     try {
       await fs.access(candidate);

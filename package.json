@@ -1,6 +1,6 @@
 {
   "name": "texvu",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "description": "A lightweight local PDF.js viewer with SyncTeX and automatic reloads for LaTeX workflows.",
   "repository": {
     "type": "git",
@@ -26,12 +26,15 @@
   ],
   "scripts": {
     "start": "node src/cli.js",
-    "check": "node --check src/cli.js && node --check src/server.js && node --check src/synctex.js",
-    "test": "npm run check",
+    "check": "node --check src/cli.js && node --check src/server.js && node --check src/synctex.js && node --check src/jump.js && node --check vendor/pdfjs/web/viewer-extension.js",
+    "test": "npm run check && node --test test/*.test.js",
     "prepack": "npm run check"
   },
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "ws": "^8.23.0"
+  }
 }

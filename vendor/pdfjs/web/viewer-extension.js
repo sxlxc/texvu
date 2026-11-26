@@ -1,6 +1,9 @@
 (() => {
   "use strict";
 
+  const pdf = new URLSearchParams(location.search).get("file");
+  if (!/^\/d\/[a-f0-9]{64}\/pdf$/.test(pdf)) return;
+  const base = pdf.slice(0, -4);
   const progressKey = "pdfjs-synctex:progress";
   let application;
   let documentState;
@@ -9,20 +12,23 @@
   let restoring = false;
 
   function readProgress() {
-    try { return JSON.parse(localStorage.getItem(progressKey) || "{}"); } catch { return {}; }
+    try {
+      const saved = localStorage.getItem(progressKey + base);
+      if (saved) return JSON.parse(saved);
+      return JSON.parse(localStorage.getItem(progressKey) || "{}")[documentState.path];
+    } catch { return null; }
   }
   function saveProgress() {
     if (!application?.pdfDocument || !documentState) return;
     const location = application.pdfViewer._location;
-    const progress = readProgress();
-    progress[documentState.path] = {
+    const progress = {
       page: application.pdfViewer.currentPageNumber,
       scale: application.pdfViewer.currentScaleValue,
       left: location?.left ?? 0,
       top: location?.top ?? 0,
       pdfOpenParams: location?.pdfOpenParams ?? null,
     };
-    localStorage.setItem(progressKey, JSON.stringify(progress));
+    localStorage.setItem(progressKey + base, JSON.stringify(progress));
   }
   function scheduleSave() {
     clearTimeout(saveTimer);
@@ -43,14 +49,14 @@
     statusTimer = setTimeout(() => element.classList.remove("visible"), 3000);
   }
   async function getDocumentState() {
-    const response = await fetch("/api/state", { cache: "no-store" });
+    const response = await fetch(base + "/api/state", { cache: "no-store" });
     if (!response.ok) throw new Error("Could not read PDF state");
     return response.json();
   }
   function restoreProgress() {
     if (restoring || !application?.pdfDocument || !documentState) return;
     restoring = true;
-    const saved = readProgress()[documentState.path];
+    const saved = readProgress();
     if (saved?.pdfOpenParams) {
       application.pdfLinkService.setHash(saved.pdfOpenParams.replace(/^#/, ""));
     } else if (saved?.scale || saved?.page) {
@@ -121,7 +127,7 @@
       documentState = nextState;
       document.title = nextState.name ? `${nextState.name} - PDF.js` : "PDF.js viewer";
       pagesReady = false;
-      await application.open({ url: `/pdf?mtime=${encodeURIComponent(nextState.mtimeMs)}` });
+      await application.open({ url: `${pdf}?mtime=${encodeURIComponent(nextState.mtimeMs)}` });
       showStatus("PDF reloaded");
     } catch (error) { showStatus(error.message); }
   }
@@ -131,7 +137,7 @@
     const line = Number(window.prompt("Source line", "1"));
     if (!Number.isFinite(line) || line < 1) return;
     try {
-      const response = await fetch("/api/synctex/forward", {
+      const response = await fetch(base + "/api/synctex/forward", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ source, line, column: 1 }),
@@ -152,7 +158,7 @@
     const rect = pageElement.getBoundingClientRect();
     const [x, y] = pageView.getPagePoint(event.clientX - rect.left, pageView.viewport.height - (event.clientY - rect.top));
     try {
-      const response = await fetch("/api/synctex/inverse", {
+      const response = await fetch(base + "/api/synctex/inverse", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ page: pageNumber, x, y, openEditor: false }),
@@ -196,7 +202,7 @@
       if (dialog.returnValue !== "save") return;
       const form = dialog.querySelector("form");
       const lines = name => form.elements[name].value.split("\n").map(value => value.trim()).filter(Boolean);
-      fetch("/api/config", {
+      fetch(base + "/api/config", {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
@@ -214,7 +220,7 @@
   async function openSettings() {
     const dialog = settingsDialog();
     const form = dialog.querySelector("form");
-    const settings = await fetch("/api/config", { cache: "no-store" }).then(response => response.json());
+    const settings = await fetch(base + "/api/config", { cache: "no-store" }).then(response => response.json());
     form.elements.synctexCommand.value = settings.synctexCommand;
     form.elements.synctexForwardArgs.value = settings.synctexForwardArgs.join("\n");
     form.elements.synctexInverseArgs.value = settings.synctexInverseArgs.join("\n");
@@ -244,12 +250,43 @@
     const viewerUrl = new URL(location.href);
     viewerUrl.searchParams.set("texvuTab", tab);
     history.replaceState(history.state, "", viewerUrl);
-    const events = new EventSource(`/events?tab=${tab}`);
+    const events = new EventTarget();
+    let socket;
+    let retry;
+    let delay = 500;
     function reportFocus() {
-      if (document.hasFocus()) fetch(`/api/focus?tab=${tab}`, { method: "POST" }).catch(() => {});
+      if (document.hasFocus() && socket?.readyState === WebSocket.OPEN) socket.send("focus");
     }
+    function connect() {
+      const url = new URL(base + "/events", location.href);
+      url.protocol = location.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("tab", tab);
+      socket = new WebSocket(url);
+      socket.onopen = async () => {
+        delay = 500;
+        reportFocus();
+        try {
+          const state = await getDocumentState();
+          if (state.mtimeMs !== documentState.mtimeMs) await reloadDocument();
+        } catch (error) { showStatus(error.message); }
+      };
+      socket.onmessage = event => {
+        const { type, data } = JSON.parse(event.data);
+        events.dispatchEvent(new CustomEvent(type, { detail: data }));
+      };
+      socket.onclose = () => {
+        retry = setTimeout(connect, delay);
+        delay = Math.min(delay * 2, 10000);
+      };
+    }
+    connect();
+    window.addEventListener("pagehide", () => {
+      clearTimeout(retry);
+      socket.onclose = null;
+      socket.close();
+    });
+    window.addEventListener("pageshow", event => { if (event.persisted) connect(); });
     window.addEventListener("focus", reportFocus);
-    events.addEventListener("open", reportFocus);
     events.addEventListener("focus-probe", reportFocus);
     let previousTitle;
     let titleTimer;
@@ -264,7 +301,7 @@
       titleTimer = setTimeout(restoreTitle, 5000);
     });
     events.addEventListener("unmark-tab", restoreTitle);
-    events.addEventListener("forward-search", event => queueJump(JSON.parse(event.data)));
+    events.addEventListener("forward-search", event => queueJump(event.detail));
     events.addEventListener("pdf-changed", reloadDocument);
     window.addEventListener("beforeunload", saveProgress);
     document.addEventListener("keydown", event => {

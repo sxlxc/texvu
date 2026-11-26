@@ -5,7 +5,10 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { execFile, spawn } from "node:child_process";
-import { listenForJumps } from "./jump.js";
+import os from "node:os";
+import { createHash, randomUUID } from "node:crypto";
+import { WebSocketServer } from "ws";
+import { listenForCommands } from "./jump.js";
 import { DEFAULT_SETTINGS, findSyncTexPath, forwardSearch, inverseSearch, openEditor } from "./synctex.js";
 
 const vendorDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../vendor/pdfjs");
@@ -75,7 +78,14 @@ async function loadSettings(pdfPath) {
 }
 
 async function writeSettings(pdfPath, settings) {
-  await fsp.writeFile(path.join(path.dirname(pdfPath), CONFIG_FILE), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+  const file = path.join(path.dirname(pdfPath), CONFIG_FILE);
+  const temp = file + "." + randomUUID();
+  try {
+    await fsp.writeFile(temp, `${JSON.stringify(settings, null, 2)}\n`, { mode: 0o600 });
+    await fsp.rename(temp, file);
+  } finally {
+    await fsp.rm(temp, { force: true });
+  }
 }
 
 function openBrowser(url) {
@@ -93,7 +103,7 @@ const firefoxScript = fileURLToPath(new URL("./focus-firefox.jxa", import.meta.u
 
 async function focusFirefox(tab) {
   // A separate Firefox profile can run as a separate macOS application instance.
-  const socket = tab.response.socket;
+  const socket = tab.socket;
   if (!socket) return "The Firefox viewer disconnected.";
   if (!tab.firefoxPid && socket.remoteAddress === socket.localAddress) {
     const { stdout } = await runFile("/usr/sbin/lsof", ["-nP", "-iTCP:" + socket.localPort, "-sTCP:ESTABLISHED", "-Fpn"], { timeout: 1000 }).catch(() => ({ stdout: "" }));
@@ -105,8 +115,8 @@ async function focusFirefox(tab) {
   }
   const run = mode => runFile("/usr/bin/osascript", ["-l", "JavaScript", firefoxScript, mode, tab.id, tab.firefoxPid ?? ""], { timeout: 3500, killSignal: "SIGKILL" });
   const probe = async () => {
-    const since = Date.now();
-    tab.response.write("event: focus-probe\ndata: {}\n\n");
+    const since = performance.now();
+    tab.send("focus-probe");
     for (let i = 0; i < 10; i++) {
       await new Promise(resolve => setTimeout(resolve, 30));
       if (tab.lastFocus >= since) return true;
@@ -115,14 +125,14 @@ async function focusFirefox(tab) {
   };
   await run("raise");
   if (await probe()) return;
-  tab.response.write("event: mark-tab\ndata: {}\n\n");
+  tab.send("mark-tab");
   try {
     const { stdout } = await run("select");
-    if (stdout.trim() === "permission") return "PDF scrolled. To select a background Firefox tab, allow Accessibility for the app running the texvu server in macOS System Settings.";
+    if (stdout.trim() === "permission") return "To select a background Firefox tab, allow Accessibility for the app running the texvu server in macOS System Settings.";
     if (await probe()) return;
-    return "PDF scrolled. Firefox could not select the viewer tab.";
+    return "Firefox could not select the viewer tab.";
   } finally {
-    tab.response.write("event: unmark-tab\ndata: {}\n\n");
+    tab.send("unmark-tab");
   }
 }
 
@@ -137,9 +147,9 @@ async function focusTab(tab) {
     if (!browser) return;
     const { stdout } = await runFile("/usr/bin/osascript", ["-l", "JavaScript", focusScript, browser, id], { timeout: 4000, killSignal: "SIGKILL" });
     if (stdout.trim() === "focused") return;
-    return "Scrolled in the background. The browser could not locate the viewer tab.";
+    return "The browser could not locate the viewer tab.";
   } catch (error) {
-    return `Scrolled in the background. Browser activation failed: ${error.stderr?.trim() || error.message}`;
+    return `Browser activation failed: ${error.stderr?.trim() || error.message}`;
   }
 }
 
@@ -149,113 +159,98 @@ function safeStaticPath(root, requestPath) {
 }
 
 async function serveFile(request, response, filePath, contentType) {
-  const stats = await fsp.stat(filePath);
-  const range = request.headers.range;
-  response.setHeader("accept-ranges", "bytes");
-  response.setHeader("content-type", contentType);
-  response.setHeader("cache-control", "no-cache");
-  if (!range) {
-    response.writeHead(200, { "content-length": stats.size });
-    if (request.method !== "HEAD") fs.createReadStream(filePath).pipe(response);
-    else response.end();
-    return;
+  const file = await fsp.open(filePath);
+  let stream;
+  try {
+    const { size } = await file.stat();
+    const range = request.headers.range;
+    let start = 0;
+    let end = size - 1;
+    response.setHeader("accept-ranges", "bytes");
+    response.setHeader("content-type", contentType);
+    response.setHeader("cache-control", "no-cache");
+    if (range) {
+      const match = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!match || (!match[1] && !match[2])) throw Object.assign(new Error("Invalid range"), { statusCode: 416 });
+      start = match[1] ? Number(match[1]) : Math.max(0, size - Number(match[2]));
+      if (match[1] && match[2]) end = Math.min(end, Number(match[2]));
+      if (start > end) throw Object.assign(new Error("Range not satisfiable"), { statusCode: 416 });
+      response.setHeader("content-range", `bytes ${start}-${end}/${size}`);
+    }
+    response.writeHead(range ? 206 : 200, { "content-length": end - start + 1 });
+    if (request.method === "HEAD" || !size || response.destroyed) return response.end();
+    stream = file.createReadStream({ start, end });
+    response.once("close", () => stream.destroy());
+    stream.on("error", error => response.destroy(error)).pipe(response);
+  } finally {
+    if (!stream) await file.close();
   }
-  const match = /^bytes=(\d*)-(\d*)$/.exec(range);
-  if (!match) throw Object.assign(new Error("Invalid range"), { statusCode: 416 });
-  const start = match[1] ? Number(match[1]) : Math.max(0, stats.size - Number(match[2]));
-  const end = match[2] ? Number(match[2]) : stats.size - 1;
-  if (start > end || start >= stats.size) throw Object.assign(new Error("Range not satisfiable"), { statusCode: 416 });
-  response.writeHead(206, { "content-range": `bytes ${start}-${Math.min(end, stats.size - 1)}/${stats.size}`, "content-length": Math.min(end, stats.size - 1) - start + 1 });
-  if (request.method !== "HEAD") fs.createReadStream(filePath, { start, end }).pipe(response);
-  else response.end();
 }
 
-export async function startServer({ pdfPath, host = "127.0.0.1", port = 4173, open = false }) {
-  const pdfStats = await fsp.stat(pdfPath).catch(() => null);
-  if (!pdfStats?.isFile()) throw new Error(`PDF file does not exist: ${pdfPath}`);
-  if (!pdfPath.toLowerCase().endsWith(".pdf")) throw new Error("The input file must have a .pdf extension");
-  let settings = await loadSettings(pdfPath);
-  const clients = new Map();
-  function targetTab() {
-    return [...clients.values()].sort((a, b) => b.lastFocus - a.lastFocus)[0];
+const stateDirectory = path.join(process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state"), "texvu", "documents");
+const documentId = pdf => createHash("sha256").update(pdf).digest("hex");
+const viewerPath = id => `/web/viewer.html?file=${encodeURIComponent(`/d/${id}/pdf`)}`;
+
+async function registeredPath(registry, id) {
+  try {
+    return await fsp.readFile(path.join(registry, id), "utf8");
+  } catch (error) {
+    if (error.code === "ENOENT") error.statusCode = 404;
+    throw error;
   }
-  let changeTimer;
-  const notifyChange = () => {
-    clearTimeout(changeTimer);
-    changeTimer = setTimeout(() => {
-      for (const { response } of clients.values()) response.write(`event: pdf-changed\ndata: ${JSON.stringify({ at: Date.now() })}\n\n`);
-    }, 120);
-  };
-  const directory = path.dirname(pdfPath);
+}
+
+async function register(registry, pdfPath, id) {
+  const file = path.join(registry, id);
+  await fsp.mkdir(registry, { mode: 0o700, recursive: true });
+  try {
+    if (await registeredPath(registry, id) === pdfPath) return;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  const temp = file + "." + randomUUID();
+  try {
+    await fsp.writeFile(temp, pdfPath, { mode: 0o600 });
+    await fsp.rename(temp, file);
+  } finally {
+    await fsp.rm(temp, { force: true });
+  }
+}
+
+function watchDocument(pdfPath) {
+  const clients = new Set();
   const pdfName = path.basename(pdfPath);
-  const syncBase = path.basename(pdfPath, ".pdf");
-  const watcher = fs.watch(directory, (event, filename) => {
-    if (!filename) return;
-    const name = filename.toString();
-    if (name === pdfName || name === `${syncBase}.synctex` || name === `${syncBase}.synctex.gz`) notifyChange();
+  const base = pdfName.slice(0, -4);
+  let timer;
+  const watcher = fs.watch(path.dirname(pdfPath), (_, name) => {
+    if (name && ![pdfName, base + ".synctex", base + ".synctex.gz"].includes(name)) return;
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      for (const tab of clients) tab.send("pdf-changed");
+    }, 120);
   });
   watcher.on("error", error => console.error(`File watch error: ${error.message}`));
+  return {
+    clients, latestJump: 0,
+    close() { watcher.close(); clearTimeout(timer); },
+    target() { return [...clients].reduce((a, b) => a && a.lastFocus > b.lastFocus ? a : b, null); },
+  };
+}
 
+export async function startServer({ host, port }) {
+  const authority = host.includes(":") ? `[${host}]:${port}` : `${host}:${port}`;
+  const origin = new URL("http://" + authority).origin;
+  const registry = path.join(stateDirectory, documentId(origin));
+  const active = new Map();
+  function allowed(request) {
+    const peer = request.headers.host;
+    if ((host === "127.0.0.1" || host === "localhost" || host === "::1") && peer !== new URL(origin).host) return false;
+    return !request.headers.origin || request.headers.origin === "http://" + peer;
+  }
   const server = http.createServer(async (request, response) => {
     try {
-      const url = new URL(request.url, `http://${host}:${port}`);
-      if (request.method === "GET" && url.pathname === "/") {
-        response.writeHead(302, { location: `/web/viewer.html?file=${encodeURIComponent("/pdf")}` });
-        response.end();
-        return;
-      }
-      if (request.method === "GET" && url.pathname === "/events") {
-        response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", "access-control-allow-origin": "*" });
-        response.write(": connected\n\n");
-        const id = url.searchParams.get("tab");
-        clients.set(id, { response, id, agent: request.headers["user-agent"] ?? "", lastFocus: 0 });
-        response.on("close", () => {
-          if (clients.get(id)?.response === response) clients.delete(id);
-        });
-        return;
-      }
-      if (url.pathname === "/api/focus" && request.method === "POST") {
-        const tab = clients.get(url.searchParams.get("tab"));
-        if (tab) tab.lastFocus = Date.now();
-        response.writeHead(204).end();
-        return;
-      }
-      if (url.pathname === "/api/state" && request.method === "GET") {
-        const stats = await fsp.stat(pdfPath);
-        const syncTexPath = await findSyncTexPath(pdfPath);
-        sendJson(response, 200, { pdf: "/pdf", name: pdfName, path: pdfPath, size: stats.size, mtimeMs: stats.mtimeMs, syncTex: Boolean(syncTexPath), syncTexPath });
-        return;
-      }
-      if (url.pathname === "/api/config" && request.method === "GET") {
-        sendJson(response, 200, settings);
-        return;
-      }
-      if (url.pathname === "/api/config" && request.method === "POST") {
-        settings = normalizeSettings(await readJson(request));
-        await writeSettings(pdfPath, settings);
-        sendJson(response, 200, settings);
-        return;
-      }
-      if (url.pathname === "/api/synctex/forward" && request.method === "POST") {
-        const body = await readJson(request);
-        if (typeof body.source !== "string" || !body.source) throw Object.assign(new Error("source is required"), { statusCode: 400 });
-        const result = await forwardSearch({ pdfPath, source: body.source, line: requireNumber(body.line, "line", 1), column: requireNumber(body.column ?? 1, "column", 1), settings });
-        sendJson(response, 200, result);
-        return;
-      }
-      if (url.pathname === "/api/synctex/inverse" && request.method === "POST") {
-        const body = await readJson(request);
-        const result = await inverseSearch({ pdfPath, page: requireNumber(body.page, "page", 1), x: requireNumber(body.x, "x"), y: requireNumber(body.y, "y"), settings });
-        if (body.openEditor !== false) {
-          try { await openEditor({ result, pdfPath, settings }); } catch (error) { result.editorError = error.message; }
-        }
-        sendJson(response, 200, result);
-        return;
-      }
-      if (url.pathname === "/pdf") {
-        await serveFile(request, response, pdfPath, "application/pdf");
-        return;
-      }
+      if (!allowed(request)) return sendError(response, 403, "Forbidden");
+      const url = new URL(request.url, origin);
       if (url.pathname === "/build/pdf.mjs" || url.pathname === "/build/pdf.renderer.mjs" || url.pathname === "/build/pdf.sandbox.mjs" || url.pathname === "/build/pdf.worker.mjs") {
         await serveFile(request, response, path.join(vendorDir, "build", path.basename(url.pathname)), "text/javascript; charset=utf-8");
         return;
@@ -269,48 +264,131 @@ export async function startServer({ pdfPath, host = "127.0.0.1", port = 4173, op
         await serveFile(request, response, filePath, MIME[path.extname(filePath)] ?? "application/octet-stream");
         return;
       }
+      const match = /^\/d\/([a-f0-9]{64})(\/.*)$/.exec(url.pathname);
+      if (!match) return sendError(response, 404, "Not found");
+      const [, id, route] = match;
+      const pdfPath = await registeredPath(registry, id);
+      const pdfName = path.basename(pdfPath);
+      if (route === "/api/state" && request.method === "GET") {
+        const stats = await fsp.stat(pdfPath);
+        const syncTexPath = await findSyncTexPath(pdfPath);
+        sendJson(response, 200, { pdf: `/d/${id}/pdf`, name: pdfName, path: pdfPath, size: stats.size, mtimeMs: stats.mtimeMs, syncTex: Boolean(syncTexPath), syncTexPath });
+        return;
+      }
+      if (route === "/api/config" && request.method === "GET") {
+        sendJson(response, 200, await loadSettings(pdfPath));
+        return;
+      }
+      if (route === "/api/config" && request.method === "POST") {
+        const settings = normalizeSettings(await readJson(request));
+        await writeSettings(pdfPath, settings);
+        sendJson(response, 200, settings);
+        return;
+      }
+      if (route === "/api/synctex/forward" && request.method === "POST") {
+        const body = await readJson(request);
+        if (typeof body.source !== "string" || !body.source) throw Object.assign(new Error("source is required"), { statusCode: 400 });
+        const result = await forwardSearch({ pdfPath, source: body.source, line: requireNumber(body.line, "line", 1), column: requireNumber(body.column ?? 1, "column", 1), settings: await loadSettings(pdfPath) });
+        sendJson(response, 200, result);
+        return;
+      }
+      if (route === "/api/synctex/inverse" && request.method === "POST") {
+        const body = await readJson(request);
+        const settings = await loadSettings(pdfPath);
+        const result = await inverseSearch({ pdfPath, page: requireNumber(body.page, "page", 1), x: requireNumber(body.x, "x"), y: requireNumber(body.y, "y"), settings });
+        if (body.openEditor !== false) {
+          try { await openEditor({ result, pdfPath, settings }); } catch (error) { result.editorError = error.message; }
+        }
+        sendJson(response, 200, result);
+        return;
+      }
+      if (route === "/pdf") {
+        response.setHeader("content-disposition", "inline; filename*=UTF-8''" + encodeURIComponent(pdfName).replace(/'/g, "%27"));
+        await serveFile(request, response, pdfPath, "application/pdf");
+        return;
+      }
       sendError(response, 404, "Not found");
     } catch (error) {
       sendError(response, error.statusCode ?? 500, error);
     }
   });
-  server.on("close", () => watcher.close());
-  await new Promise((resolve, reject) => {
-    const onError = error => { server.off("listening", onListening); reject(error); };
-    const onListening = () => { server.off("error", onError); resolve(); };
-    server.once("error", onError);
-    server.once("listening", onListening);
-    server.listen(port, host);
+  const events = new WebSocketServer({ noServer: true, maxPayload: 128, clientTracking: false });
+  server.on("upgrade", async (request, socket, head) => {
+    socket.on("error", () => socket.destroy());
+    socket.setKeepAlive(true, 60000);
+    try {
+      const url = new URL(request.url, origin);
+      const match = /^\/d\/([a-f0-9]{64})\/events$/.exec(url.pathname);
+      const tabId = url.searchParams.get("tab");
+      if (!allowed(request) || !match || !/^\d+(?:-\d+){3}$/.test(tabId)) return socket.destroy();
+      const id = match[1];
+      const pdfPath = await registeredPath(registry, id);
+      events.handleUpgrade(request, socket, head, ws => {
+        let doc = active.get(id);
+        if (!doc) {
+          doc = watchDocument(pdfPath);
+          active.set(id, doc);
+        }
+        const tab = {
+          socket, id: tabId, agent: request.headers["user-agent"] ?? "", lastFocus: 0,
+          send(type, data) { ws.send(JSON.stringify({ type, data })); },
+        };
+        doc.clients.add(tab);
+        ws.on("error", () => ws.terminate());
+        ws.on("message", data => {
+          if (data.toString() === "focus") tab.lastFocus = performance.now();
+        });
+        ws.once("close", () => {
+          doc.clients.delete(tab);
+          if (!doc.clients.size) {
+            doc.close();
+            active.delete(id);
+          }
+        });
+      });
+    } catch { socket.destroy(); }
   });
-  const url = `http://${host}:${server.address().port}/web/viewer.html?file=${encodeURIComponent("/pdf")}`;
-  let latestJump = 0;
+  await new Promise((resolve, reject) => server.once("error", reject).listen(port, host, resolve));
   try {
-    const control = await listenForJumps(pdfPath, async (request, response) => {
+    await listenForCommands(host, port, async (request, response) => {
       try {
-        if (request.method === "GET") return sendJson(response, 200, { lastFocus: targetTab()?.lastFocus ?? null });
-        const noViewer = `No viewer open for ${pdfName}. Open ${url}`;
-        if (!targetTab()) throw new Error(noViewer);
-        const { source, line, column, focus = true } = await readJson(request);
-        const sequence = ++latestJump;
-        const position = await forwardSearch({ pdfPath, source, line, column, settings });
-        if (sequence !== latestJump) return sendJson(response, 200, {});
-        const tab = targetTab();
-        if (!tab) throw new Error(noViewer);
-        const warning = focus ? await focusTab(tab) : undefined;
-        if (sequence !== latestJump) return sendJson(response, 200, {});
-        if (tab.response.destroyed) throw new Error(noViewer);
-        tab.response.write(`event: forward-search\ndata: ${JSON.stringify(position)}\n\n`);
+        const body = await readJson(request);
+        const pdfPath = await fsp.realpath(body.pdf);
+        const id = documentId(pdfPath);
+        const url = origin + viewerPath(id);
+        const doc = active.get(id);
+        const tab = doc?.target();
+        if (request.url === "/open") {
+          if (!pdfPath.toLowerCase().endsWith(".pdf") || !(await fsp.stat(pdfPath)).isFile()) {
+            throw new Error("Expected a PDF file");
+          }
+          await register(registry, pdfPath, id);
+          let warning;
+          if (body.open) {
+            if (tab && process.platform === "darwin" && /Firefox\/|Chrome\/|Version\/.*Safari\//.test(tab.agent)) warning = await focusTab(tab);
+            else openBrowser(url);
+          }
+          return sendJson(response, 200, { url, warning });
+        }
+        if (request.url !== "/jump") return sendError(response, 404, "Unknown command");
+        if (!tab) throw new Error(`No viewer open for ${pdfPath}. Run texvu with that PDF first.`);
+        const sequence = ++doc.latestJump;
+        const { source, line, column, focus } = body;
+        const position = await forwardSearch({ pdfPath, source, line, column, settings: await loadSettings(pdfPath) });
+        if (sequence !== doc.latestJump) return sendJson(response, 200, {});
+        const target = doc.target();
+        if (!target) throw new Error(`Viewer disconnected. Open ${url}`);
+        const warning = focus ? await focusTab(target) : undefined;
+        if (sequence === doc.latestJump) {
+          if (!doc.clients.has(target)) throw new Error(`Viewer disconnected. Open ${url}`);
+          target.send("forward-search", position);
+        }
         sendJson(response, 200, { warning });
       } catch (error) { sendError(response, 400, error); }
     });
-    server.once("close", () => control.close());
   } catch (error) {
     server.close();
     throw error;
   }
-  console.log(`texvu serving ${pdfPath}`);
-  console.log(`Viewer: ${url}`);
-  console.log(`SyncTeX: ${await findSyncTexPath(pdfPath) ? "available" : "not found"}`);
-  if (open) openBrowser(url);
-  return { server, url };
+  console.log(`texvu listening on ${origin}`);
 }
